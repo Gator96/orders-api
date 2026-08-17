@@ -1,11 +1,10 @@
-trigger: 
+trigger:
   branches:
-     include:
-       - main
+    include:
+      - main
 
-pool: 
+pool:
   vmImage: ubuntu-latest
-
 
 variables:
   buildConfiguration: Release
@@ -31,6 +30,29 @@ stages:
               echo "Validate Kubernetes manifests"
               ls -la k8s/
             displayName: Validate Kubernetes Files
+
+          # Build the Docker image in ACR and push it there
+          - task: AzureCLI@2
+            displayName: Build and Push Image to ACR
+            inputs:
+              azureSubscription: 'azure-dev-service-connection'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az acr build \
+                  --registry ujordersacr \
+                  --image orders-api:$(Build.BuildId) \
+                  .
+
+          # Update the deployment manifest to use THIS build's image
+          - script: |
+              echo "Updating deployment image"
+              sed -i \
+                "s|nginx:latest|ujordersacr.azurecr.io/orders-api:$(Build.BuildId)|" \
+                k8s/deployment.yaml
+
+              grep "image:" k8s/deployment.yaml
+            displayName: Set Deployment Image
 
           - script: |
               mkdir -p $(Build.ArtifactStagingDirectory)/k8s
@@ -59,15 +81,18 @@ stages:
           - task: AzureCLI@2
             displayName: Deploy manifests to AKS
             inputs:
-             azureSubscription: 'azure-dev-service-connection'
-             scriptType: bash
-             scriptLocation: inlineScript
-             inlineScript: |
-               az aks get-credentials \
+              azureSubscription: 'azure-dev-service-connection'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials \
                   --resource-group sre-interview-lab-rg \
                   --name aks-sre-lab \
                   --overwrite-existing
 
-               kubectl apply \
-                 -f $(Pipeline.Workspace)/kubernetes-manifests/
+                kubectl apply \
+                  -f $(Pipeline.Workspace)/kubernetes-manifests/
 
+                kubectl rollout status \
+                  deployment/orders-api \
+                  -n sre-lab
