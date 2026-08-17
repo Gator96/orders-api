@@ -8,6 +8,10 @@ pool:
 
 variables:
   buildConfiguration: Release
+  imageRepository: orders-api
+  dockerRegistryServiceConnection: acr-service-connection
+  containerRegistry: ujordersacr.azurecr.io
+  tag: $(Build.BuildId)
 
 stages:
   - stage: Build
@@ -23,6 +27,7 @@ stages:
           - script: |
               echo "Repository checked out"
               echo "Build configuration: $(buildConfiguration)"
+              echo "Build ID: $(Build.BuildId)"
               ls -la
             displayName: Inspect Repository
 
@@ -31,26 +36,24 @@ stages:
               ls -la k8s/
             displayName: Validate Kubernetes Files
 
-          # Build the Docker image in ACR and push it there
-          - task: AzureCLI@2
+          - task: Docker@2
             displayName: Build and Push Image to ACR
             inputs:
-              azureSubscription: 'azure-dev-service-connection'
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                az acr build \
-                  --registry ujordersacr \
-                  --image orders-api:$(Build.BuildId) \
-                  .
+              command: buildAndPush
+              containerRegistry: $(dockerRegistryServiceConnection)
+              repository: $(imageRepository)
+              Dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+              tags: |
+                $(tag)
 
-          # Update the deployment manifest to use THIS build's image
           - script: |
-              echo "Updating deployment image"
+              echo "Updating deployment manifest with ACR image"
+
               sed -i \
-                "s|nginx:latest|ujordersacr.azurecr.io/orders-api:$(Build.BuildId)|" \
+                "s|nginx:latest|$(containerRegistry)/$(imageRepository):$(tag)|" \
                 k8s/deployment.yaml
 
+              echo "Deployment image is now:"
               grep "image:" k8s/deployment.yaml
             displayName: Set Deployment Image
 
@@ -60,10 +63,10 @@ stages:
             displayName: Prepare Deployment Artifact
 
           - task: PublishPipelineArtifact@1
+            displayName: Publish Kubernetes Artifact
             inputs:
               targetPath: '$(Build.ArtifactStagingDirectory)/k8s'
-              artifact: 'kubernetes-manifests'
-            displayName: Publish Kubernetes Artifact
+              artifact: kubernetes-manifests
 
   - stage: Deploy_Dev
     displayName: Deploy to Dev
@@ -81,7 +84,7 @@ stages:
           - task: AzureCLI@2
             displayName: Deploy manifests to AKS
             inputs:
-              azureSubscription: 'azure-dev-service-connection'
+              azureSubscription: azure-dev-service-connection
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
