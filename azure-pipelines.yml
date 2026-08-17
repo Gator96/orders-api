@@ -14,6 +14,10 @@ variables:
   tag: $(Build.BuildId)
 
 stages:
+
+  # =========================
+  # BUILD STAGE
+  # =========================
   - stage: Build
     displayName: Build and Validate
 
@@ -22,8 +26,11 @@ stages:
         displayName: Build Application
 
         steps:
+
+          # Get source code from GitHub
           - checkout: self
 
+          # Basic repository inspection
           - script: |
               echo "Repository checked out"
               echo "Build configuration: $(buildConfiguration)"
@@ -31,11 +38,13 @@ stages:
               ls -la
             displayName: Inspect Repository
 
+          # Check Kubernetes files exist
           - script: |
               echo "Validate Kubernetes manifests"
               ls -la k8s/
             displayName: Validate Kubernetes Files
 
+          # Build Docker image and push to ACR
           - task: Docker@2
             displayName: Build and Push Image to ACR
             inputs:
@@ -46,28 +55,35 @@ stages:
               tags: |
                 $(tag)
 
+          # Replace nginx:latest with versioned ACR image
           - script: |
-              echo "Updating deployment manifest with ACR image"
+              echo "Updating Kubernetes deployment image"
 
               sed -i \
                 "s|nginx:latest|$(containerRegistry)/$(imageRepository):$(tag)|" \
                 k8s/deployment.yaml
 
-              echo "Deployment image is now:"
+              echo "Deployment will use:"
               grep "image:" k8s/deployment.yaml
             displayName: Set Deployment Image
 
+          # Prepare Kubernetes YAML as pipeline artifact
           - script: |
               mkdir -p $(Build.ArtifactStagingDirectory)/k8s
               cp k8s/*.yaml $(Build.ArtifactStagingDirectory)/k8s/
             displayName: Prepare Deployment Artifact
 
+          # Publish manifests
           - task: PublishPipelineArtifact@1
             displayName: Publish Kubernetes Artifact
             inputs:
               targetPath: '$(Build.ArtifactStagingDirectory)/k8s'
               artifact: kubernetes-manifests
 
+
+  # =========================
+  # DEPLOY DEV STAGE
+  # =========================
   - stage: Deploy_Dev
     displayName: Deploy to Dev
     dependsOn: Build
@@ -78,24 +94,48 @@ stages:
         displayName: Deploy to AKS Dev
 
         steps:
+
+          # Fresh agent: checkout source again
+          # Needed so scripts/check_aks_health.py exists
+          - checkout: self
+
+          # Download the EXACT manifests produced by Build
           - download: current
             artifact: kubernetes-manifests
 
+          # Authenticate to Azure and deploy to AKS
           - task: AzureCLI@2
-            displayName: Deploy manifests to AKS
+            displayName: Deploy Manifests to AKS
             inputs:
               azureSubscription: azure-dev-service-connection
               scriptType: bash
               scriptLocation: inlineScript
               inlineScript: |
+                echo "Getting AKS credentials"
+
                 az aks get-credentials \
                   --resource-group sre-interview-lab-rg \
                   --name aks-sre-lab \
                   --overwrite-existing
 
+                echo "Deploying Kubernetes manifests"
+
                 kubectl apply \
                   -f $(Pipeline.Workspace)/kubernetes-manifests/
 
+                echo "Waiting for rollout"
+
                 kubectl rollout status \
                   deployment/orders-api \
-                  -n sre-lab
+                  -n sre-lab \
+                  --timeout=120s
+
+          # Operational Python validation
+          - script: |
+              echo "Running Python application health check"
+
+              python3 scripts/check_aks_health.py
+            displayName: Validate Application Health
+            env:
+              NAMESPACE: sre-lab
+              APP_LABEL: orders-api
