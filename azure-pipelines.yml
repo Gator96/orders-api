@@ -1,0 +1,73 @@
+trigger: 
+  branches:
+     include:
+       - main
+
+pool: 
+  vmImage: ubuntu-latest
+
+
+variables:
+  buildConfiguration: Release
+
+stages:
+  - stage: Build
+    displayName: Build and Validate
+
+    jobs:
+      - job: BuildJob
+        displayName: Build Application
+
+        steps:
+          - checkout: self
+
+          - script: |
+              echo "Repository checked out"
+              echo "Build configuration: $(buildConfiguration)"
+              ls -la
+            displayName: Inspect Repository
+
+          - script: |
+              echo "Validate Kubernetes manifests"
+              ls -la k8s/
+            displayName: Validate Kubernetes Files
+
+          - script: |
+              mkdir -p $(Build.ArtifactStagingDirectory)/k8s
+              cp k8s/*.yaml $(Build.ArtifactStagingDirectory)/k8s/
+            displayName: Prepare Deployment Artifact
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/k8s'
+              artifact: 'kubernetes-manifests'
+            displayName: Publish Kubernetes Artifact
+
+  - stage: Deploy_Dev
+    displayName: Deploy to Dev
+    dependsOn: Build
+    condition: succeeded()
+
+    jobs:
+      - job: DeployJob
+        displayName: Deploy to AKS Dev
+
+        steps:
+          - download: current
+            artifact: kubernetes-manifests
+
+          - task: AzureCLI@2
+            displayName: Deploy manifests to AKS
+            inputs:
+             azureSubscription: 'azure-dev-service-connection'
+             scriptType: bash
+             scriptLocation: inlineScript
+             inlineScript: |
+               az aks get-credentials \
+                  --resource-group sre-interview-lab-rg \
+                  --name aks-sre-lab \
+                  --overwrite-existing
+
+               kubectl apply \
+                 -f $(Pipeline.Workspace)/kubernetes-manifests/
+
